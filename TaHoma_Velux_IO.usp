@@ -69,7 +69,10 @@
 /*******************************************************************************************
   DIGITAL, ANALOG and SERIAL INPUTS and OUTPUTS
 *******************************************************************************************/
-DIGITAL_INPUT   OPEN,
+DIGITAL_INPUT   _SKIP_,
+				_SKIP_,
+				_SKIP_,
+				OPEN,
                 CLOSE,
                 STOP,
                 MY_POSITION,
@@ -81,7 +84,10 @@ DIGITAL_INPUT   OPEN,
 
 ANALOG_INPUT    POSITION_IN;
 
-DIGITAL_OUTPUT  CONNECT_TCP,
+DIGITAL_OUTPUT  _SKIP_,
+				_SKIP_,
+				_SKIP_,
+				CONNECT_TCP,
                 _SKIP_,
                 CMD_SENT_FB,
                 ERROR_FB,
