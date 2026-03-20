@@ -1,6 +1,6 @@
 /*******************************************************************************************
   SIMPL+ Module Information
-  Somfy TaHoma Local API - Contrôle Velux IO - Version 1.0
+  Somfy TaHoma Local API - Contrôle Velux IO - Version 1.1
 *******************************************************************************************
   Dealer Name:
   System Name:
@@ -9,38 +9,39 @@
   Comments:
     Module de pilotage de velux Somfy IO via la passerelle TaHoma (API locale HTTPS/REST)
 
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  Architecture                                                       │
-    │                                                                     │
-    │  SIMPL+ Module                                                      │
-    │    TX$ ──────→ [TCP Client SIMPL - SSL Port 8443] ──→ TaHoma ──→ Velux IO │
-    │    RX$ ←────── [TCP Client SIMPL - SSL Port 8443] ←── TaHoma             │
-    └─────────────────────────────────────────────────────────────────────┘
+    Architecture:
+      SIMPL+ Module -> TX$ -> [TCP Client SIMPL SSL Port 8443] -> TaHoma -> Velux IO
+      SIMPL+ Module <- RX$ <- [TCP Client SIMPL SSL Port 8443] <- TaHoma
 
-    Configuration du TCP Client dans SIMPL Windows :
+    Configuration du TCP Client dans SIMPL Windows:
       - IP Address    : Adresse IP de la passerelle TaHoma (ex: 192.168.1.100)
       - Port          : 8443
-      - Use SSL       : Coché (TLS activé)
-      - Auto Reconnect: Coché
+      - Use SSL       : Coche (TLS active)
+      - Auto Reconnect: Coche
 
-    Obtenir le token API local Somfy :
-      1. Aller sur https://developer.somfy.com/ → My Profile
-      2. Developer Mode → Generate Token
-      3. Copier le token dans le paramètre API_TOKEN
+    Connexions SIMPL Windows:
+      TX$           -> TCP Client Tx
+      RX$           <- TCP Client Rx
+      CONNECT_TCP   -> TCP Client Connect
+      TCP_CONNECTED <- TCP Client Connected
 
-    Trouver l'URL d'un équipement Velux IO :
-      - Utiliser l'API locale: GET https://{ip}:8443/enduser-mobile-web/1/enduserAPI/setup/devices
-      - L'URL ressemble à: io://xxxx-xxxx-xxxx/1234567890
+    Obtenir le token API local Somfy:
+      1. https://developer.somfy.com/ -> My Profile -> Developer Mode -> Generate Token
+      2. Copier le token dans le parametre API_TOKEN
 
-    Commandes supportées pour Velux IO :
-      - open          : Ouvrir complètement
-      - close         : Fermer complètement
-      - stop          : Arrêt en position courante
-      - my            : Position favorite (bouton MY de la télécommande)
-      - setClosure    : Position précise (0 = ouvert, 100 = fermé)
+    Trouver l URL d un equipement Velux IO:
+      GET https://{ip}:8443/enduser-mobile-web/1/enduserAPI/setup/devices
+      L URL ressemble a: io://xxxx-xxxx-xxxx/1234567890
 
-    IMPORTANT: Un seul module par équipement. Instancier autant de modules
-               que d'équipements à piloter.
+    Commandes supportees pour Velux IO:
+      OPEN         : Ouvrir completement
+      CLOSE        : Fermer completement
+      STOP         : Arret en position courante
+      MY_POSITION  : Position favorite (bouton MY)
+      SET_POSITION : Position precise via POSITION_IN (0=ouvert, 100=ferme)
+      GET_STATE    : Interroger la position courante
+
+    IMPORTANT: Un seul module par equipement.
 *******************************************************************************************/
 
 /*******************************************************************************************
@@ -56,54 +57,50 @@
 *******************************************************************************************/
 #DEFINE_CONSTANT MAX_BUFFER         2000
 #DEFINE_CONSTANT HTTP_PORT          8443
-#DEFINE_CONSTANT POS_OUVERT         0       // 0%  = ouvert (convention TaHoma)
-#DEFINE_CONSTANT POS_FERME          100     // 100% = fermé (convention TaHoma)
+#DEFINE_CONSTANT POS_OUVERT         0
+#DEFINE_CONSTANT POS_FERME          100
 
-// Codes commandes internes
 #DEFINE_CONSTANT CMD_OPEN           1
 #DEFINE_CONSTANT CMD_CLOSE          2
 #DEFINE_CONSTANT CMD_STOP           3
 #DEFINE_CONSTANT CMD_MY             4
 #DEFINE_CONSTANT CMD_POSITION       5
 
-// CRLF HTTP
-#DEFINE_CONSTANT CRLF               "\x0D\x0A"
-
 /*******************************************************************************************
   DIGITAL, ANALOG and SERIAL INPUTS and OUTPUTS
 *******************************************************************************************/
-DIGITAL_INPUT   OPEN,               // Ouvrir le velux
-                CLOSE,              // Fermer le velux
-                STOP,               // Arrêt
-                MY_POSITION,        // Aller à la position favorite (MY)
+DIGITAL_INPUT   OPEN,
+                CLOSE,
+                STOP,
+                MY_POSITION,
                 _SKIP_,
-                SET_POSITION_CLK,   // Déclencher un SET_CLOSURE avec POSITION_IN
-                GET_STATE_CLK,      // Interroger l'état courant
+                SET_POSITION_CLK,
+                GET_STATE_CLK,
                 _SKIP_,
-                TCP_CONNECTED;      // ← Relier au Connected du TCP Client SIMPL
+                TCP_CONNECTED;
 
-ANALOG_INPUT    POSITION_IN;        // Consigne de position 0-100 (0=ouvert, 100=fermé)
+ANALOG_INPUT    POSITION_IN;
 
-DIGITAL_OUTPUT  CONNECT_TCP,        // → Relier au Connect du TCP Client SIMPL
+DIGITAL_OUTPUT  CONNECT_TCP,
                 _SKIP_,
-                CMD_SENT_FB,        // Impulsion: commande envoyée
-                ERROR_FB,           // Impulsion: erreur (HTTP ou connexion)
+                CMD_SENT_FB,
+                ERROR_FB,
                 _SKIP_,
-                IS_OPEN_FB,         // Feedback: velux ouvert
-                IS_CLOSED_FB,       // Feedback: velux fermé
-                IS_MOVING_FB;       // Feedback: mouvement en cours
+                IS_OPEN_FB,
+                IS_CLOSED_FB,
+                IS_MOVING_FB;
 
-ANALOG_OUTPUT   POSITION_FB;        // Retour de position courante (0-100)
+ANALOG_OUTPUT   POSITION_FB;
 
-STRING_OUTPUT   TX$;                // → Relier au TX$ du TCP Client SIMPL
-STRING_INPUT    RX$[MAX_BUFFER];    // ← Relier au RX$ du TCP Client SIMPL
+STRING_OUTPUT   TX$;
+STRING_INPUT    RX$[MAX_BUFFER];
 
 /*******************************************************************************************
   Parameters
 *******************************************************************************************/
-STRING_PARAMETER API_TOKEN[200];    // Token Bearer Somfy Developer (sans "Bearer ")
-STRING_PARAMETER DEVICE_URL[200];   // URL équipement  ex: io://xxxx-xxxx-xxxx/1234567890
-STRING_PARAMETER TAHOMA_IP[50];     // IP passerelle TaHoma (pour Host header)
+STRING_PARAMETER API_TOKEN[200];
+STRING_PARAMETER DEVICE_URL[200];
+STRING_PARAMETER TAHOMA_IP[50];
 
 /*******************************************************************************************
   Global Variables
@@ -115,82 +112,79 @@ INTEGER     LAST_CMD;
 STRING      RX_BUFFER[MAX_BUFFER];
 
 /*******************************************************************************************
-  Helper Functions - Construction des requêtes HTTP
+  Helper Functions - Construction des requetes HTTP
+  Note: "\x0D\x0A" = CRLF (HTTP line ending)
+        "\x22"      = guillemet double (pour JSON)
 *******************************************************************************************/
 
-// Envoie une requête POST HTTP/1.1 avec un corps JSON
 FUNCTION SendHttpPost(STRING endpoint, STRING jsonBody)
 {
-    STRING request[1500];
+    STRING  request[1500];
     INTEGER bodyLen;
 
     bodyLen = LEN(jsonBody);
 
-    request = "POST " + endpoint + " HTTP/1.1" + CRLF +
-              "Host: " + TAHOMA_IP + ":" + ItoA(HTTP_PORT) + CRLF +
-              "Authorization: Bearer " + API_TOKEN + CRLF +
-              "Content-Type: application/json" + CRLF +
-              "Content-Length: " + ItoA(bodyLen) + CRLF +
-              "Connection: close" + CRLF +
-              CRLF +
+    request = "POST " + endpoint + " HTTP/1.1" + "\x0D\x0A" +
+              "Host: " + TAHOMA_IP + ":" + ItoA(HTTP_PORT) + "\x0D\x0A" +
+              "Authorization: Bearer " + API_TOKEN + "\x0D\x0A" +
+              "Content-Type: application/json" + "\x0D\x0A" +
+              "Content-Length: " + ItoA(bodyLen) + "\x0D\x0A" +
+              "Connection: close" + "\x0D\x0A" +
+              "\x0D\x0A" +
               jsonBody;
 
-    TRACE("→ HTTP POST %s (body: %d bytes)", endpoint, bodyLen);
+    TRACE("-> HTTP POST %s (%d bytes body)", endpoint, bodyLen);
     TX$ = request;
     WAITING_RESPONSE = 1;
     IS_MOVING_FB = 1;
     PULSE(20, CMD_SENT_FB);
 }
 
-// Envoie une requête GET HTTP/1.1
 FUNCTION SendHttpGet(STRING endpoint)
 {
-    STRING request[600];
+    STRING request[800];
 
-    request = "GET " + endpoint + " HTTP/1.1" + CRLF +
-              "Host: " + TAHOMA_IP + ":" + ItoA(HTTP_PORT) + CRLF +
-              "Authorization: Bearer " + API_TOKEN + CRLF +
-              "Connection: close" + CRLF +
-              CRLF;
+    request = "GET " + endpoint + " HTTP/1.1" + "\x0D\x0A" +
+              "Host: " + TAHOMA_IP + ":" + ItoA(HTTP_PORT) + "\x0D\x0A" +
+              "Authorization: Bearer " + API_TOKEN + "\x0D\x0A" +
+              "Connection: close" + "\x0D\x0A" +
+              "\x0D\x0A";
 
-    TRACE("→ HTTP GET %s", endpoint);
+    TRACE("-> HTTP GET %s", endpoint);
     TX$ = request;
     WAITING_RESPONSE = 1;
 }
 
-// Construit le JSON exec/apply pour une commande sans paramètre
+// JSON exec/apply sans parametre: open, close, stop, my
 FUNCTION SendVeluxCmd(STRING cmdName)
 {
     STRING jsonBody[500];
 
-    jsonBody = "{\"label\":\"" + cmdName + "\"," +
-               "\"actions\":[{" +
-               "\"deviceURL\":\"" + DEVICE_URL + "\"," +
-               "\"commands\":[{\"name\":\"" + cmdName + "\"}]" +
-               "}]}";
+    jsonBody = "\x7B\x22label\x22:\x22" + cmdName + "\x22," +
+               "\x22actions\x22:[{\x22deviceURL\x22:\x22" + DEVICE_URL + "\x22," +
+               "\x22commands\x22:[{\x22name\x22:\x22" + cmdName + "\x22}]}]}";
 
     SendHttpPost("/enduser-mobile-web/1/enduserAPI/exec/apply", jsonBody);
 }
 
-// Construit le JSON exec/apply pour setClosure (position 0-100)
+// JSON exec/apply setClosure avec position 0-100
 FUNCTION SendVeluxPosition(INTEGER position)
 {
     STRING jsonBody[500];
 
-    jsonBody = "{\"label\":\"setClosure\"," +
-               "\"actions\":[{" +
-               "\"deviceURL\":\"" + DEVICE_URL + "\"," +
-               "\"commands\":[{\"name\":\"setClosure\",\"parameters\":[" + ItoA(position) + "]}]" +
-               "}]}";
+    jsonBody = "\x7B\x22label\x22:\x22setClosure\x22," +
+               "\x22actions\x22:[{\x22deviceURL\x22:\x22" + DEVICE_URL + "\x22," +
+               "\x22commands\x22:[{\x22name\x22:\x22setClosure\x22,\x22parameters\x22:[" +
+               ItoA(position) + "]}]}]}";
 
     SendHttpPost("/enduser-mobile-web/1/enduserAPI/exec/apply", jsonBody);
 }
 
 /*******************************************************************************************
-  Helper Functions - Parsing de la réponse HTTP
+  Helper Functions - Parsing de la reponse HTTP
 *******************************************************************************************/
 
-// Retourne le code de statut HTTP (200, 401, 404...)
+// Retourne le code de statut HTTP: "HTTP/1.1 200 OK" -> 200
 INTEGER_FUNCTION ParseHttpStatus(STRING response)
 {
     INTEGER pos;
@@ -200,38 +194,48 @@ INTEGER_FUNCTION ParseHttpStatus(STRING response)
     IF (pos = 0)
         RETURN(0);
 
-    // "HTTP/1.x " = 9 caractères → ensuite 3 chiffres du code
     statusStr = MID(response, pos + 9, 3);
     RETURN(ATOI(statusStr));
 }
 
-// Extrait la valeur numérique d'un champ JSON simple : "key":valeur
+// Extrait la valeur entiere d un champ JSON : recherche "key":NNN
+// FIX: utilise une variable temporaire pour FIND (pas de concatenation en argument)
+// FIX: utilise dummy = REMOVE() pour satisfaire le compilateur SIMPL+
 INTEGER_FUNCTION ParseJsonInt(STRING json, STRING key)
 {
-    INTEGER keyPos, valuePos;
+    INTEGER keyPos, colonPos;
+    STRING  searchKey[210];
+    STRING  afterKey[150];
     STRING  token[20];
+    STRING  dummy[25];
 
-    keyPos = FIND("\"" + key + "\"", json);
+    // Construction de la cle entre guillemets: "key"
+    // \x22 = guillemet double - evite la concatenation de litteraux dans FIND
+    searchKey = "\x22" + key + "\x22";
+    keyPos = FIND(searchKey, json);
     IF (keyPos = 0)
         RETURN(-1);
 
-    // Chercher ":" après la clé
-    valuePos = FIND(":", json);
-    IF (valuePos = 0 || valuePos < keyPos)
+    // Extraire la sous-chaine a partir de la cle pour trouver le ":" qui suit
+    afterKey = MID(json, keyPos, 100);
+    colonPos = FIND(":", afterKey);
+    IF (colonPos = 0)
         RETURN(-1);
 
-    // Lire jusqu'au prochain délimiteur JSON
-    token = MID(json, valuePos + 1, 10);
-    WHILE (FIND(",",  token) > 0)   REMOVE(",",  token);
-    WHILE (FIND("}",  token) > 0)   REMOVE("}",  token);
-    WHILE (FIND("]",  token) > 0)   REMOVE("]",  token);
-    WHILE (FIND(" ",  token) > 0)   REMOVE(" ",  token);
-    WHILE (FIND(CRLF, token) > 0)   REMOVE(CRLF, token);
+    // Lire la valeur apres le ":"
+    token = MID(afterKey, colonPos + 1, 15);
+
+    // Supprimer les delimiteurs JSON - dummy obligatoire car REMOVE retourne une STRING
+    WHILE (FIND(",",    token) > 0) { dummy = REMOVE(",",    token); }
+    WHILE (FIND("}",    token) > 0) { dummy = REMOVE("}",    token); }
+    WHILE (FIND("]",    token) > 0) { dummy = REMOVE("]",    token); }
+    WHILE (FIND(" ",    token) > 0) { dummy = REMOVE(" ",    token); }
+    WHILE (FIND("\x0D", token) > 0) { dummy = REMOVE("\x0D", token); }
+    WHILE (FIND("\x0A", token) > 0) { dummy = REMOVE("\x0A", token); }
 
     RETURN(ATOI(token));
 }
 
-// Met à jour les feedbacks de position/état
 FUNCTION UpdateStateFeedbacks(INTEGER position)
 {
     CURRENT_POSITION = position;
@@ -239,59 +243,51 @@ FUNCTION UpdateStateFeedbacks(INTEGER position)
     IS_OPEN_FB       = (position = POS_OUVERT);
     IS_CLOSED_FB     = (position = POS_FERME);
     IS_MOVING_FB     = 0;
-    TRACE("← Position: %d%% (ouvert=%d, fermé=%d)", position, IS_OPEN_FB, IS_CLOSED_FB);
+    TRACE("<- Position: %d%% (ouvert=%d, ferme=%d)", position, IS_OPEN_FB, IS_CLOSED_FB);
 }
 
-// Analyse le corps JSON d'une réponse d'état TaHoma
 FUNCTION ParseStateResponse(STRING response)
 {
     INTEGER closureValue;
 
-    // Chercher la valeur "core:ClosureState" ou champ générique "value"
-    // Format typique: [{"name":"core:ClosureState","type":3,"value":50}]
+    // Format TaHoma: [{"name":"core:ClosureState","type":3,"value":50}]
     closureValue = ParseJsonInt(response, "value");
 
     IF (closureValue >= 0 && closureValue <= 100)
         UpdateStateFeedbacks(closureValue);
     ELSE
-        TRACE("Valeur closure introuvable ou hors plage");
+        TRACE("Valeur closure introuvable ou hors plage (0-100)");
 }
 
-// Traite une réponse HTTP complète
 FUNCTION ProcessHttpResponse(STRING response)
 {
     INTEGER httpStatus;
 
     httpStatus = ParseHttpStatus(response);
-    TRACE("← HTTP Status: %d", httpStatus);
+    TRACE("<- HTTP Status: %d", httpStatus);
 
     IF (httpStatus >= 200 && httpStatus < 300)
     {
-        // Succès : si la réponse contient un état, le parser
-        IF (FIND("\"value\"", response) > 0)
+        IF (FIND("\x22value\x22", response) > 0)
             ParseStateResponse(response);
         ELSE
-        {
-            // Commande envoyée avec succès, IS_MOVING reste actif
-            // TaHoma confirme la réception de la commande
-            TRACE("Commande acceptée par TaHoma");
-        }
+            TRACE("Commande acceptee par TaHoma");
     }
     ELSE IF (httpStatus = 401)
     {
-        TRACE("ERREUR 401: Token API invalide ou expiré");
+        TRACE("ERREUR 401: Token API invalide ou expire");
         IS_MOVING_FB = 0;
         PULSE(20, ERROR_FB);
     }
     ELSE IF (httpStatus = 404)
     {
-        TRACE("ERREUR 404: Device URL introuvable (%s)", DEVICE_URL);
+        TRACE("ERREUR 404: Device URL introuvable");
         IS_MOVING_FB = 0;
         PULSE(20, ERROR_FB);
     }
     ELSE IF (httpStatus = 0)
     {
-        TRACE("ERREUR: Pas de réponse HTTP valide");
+        TRACE("ERREUR: Pas de reponse HTTP valide");
         IS_MOVING_FB = 0;
         PULSE(20, ERROR_FB);
     }
@@ -311,7 +307,7 @@ PUSH OPEN
 {
     IF (CONNECTED = 0)
     {
-        TRACE("OPEN ignoré: TCP non connecté");
+        TRACE("OPEN ignore: TCP non connecte");
         PULSE(20, ERROR_FB);
         RETURN;
     }
@@ -324,7 +320,7 @@ PUSH CLOSE
 {
     IF (CONNECTED = 0)
     {
-        TRACE("CLOSE ignoré: TCP non connecté");
+        TRACE("CLOSE ignore: TCP non connecte");
         PULSE(20, ERROR_FB);
         RETURN;
     }
@@ -337,7 +333,7 @@ PUSH STOP
 {
     IF (CONNECTED = 0)
     {
-        TRACE("STOP ignoré: TCP non connecté");
+        TRACE("STOP ignore: TCP non connecte");
         PULSE(20, ERROR_FB);
         RETURN;
     }
@@ -351,7 +347,7 @@ PUSH MY_POSITION
 {
     IF (CONNECTED = 0)
     {
-        TRACE("MY ignoré: TCP non connecté");
+        TRACE("MY ignore: TCP non connecte");
         PULSE(20, ERROR_FB);
         RETURN;
     }
@@ -366,16 +362,16 @@ PUSH SET_POSITION_CLK
 
     IF (CONNECTED = 0)
     {
-        TRACE("SET_POSITION ignoré: TCP non connecté");
+        TRACE("SET_POSITION ignore: TCP non connecte");
         PULSE(20, ERROR_FB);
         RETURN;
     }
 
     pos = POSITION_IN;
-    IF (pos > POS_FERME)   pos = POS_FERME;
-    IF (pos < POS_OUVERT)  pos = POS_OUVERT;
+    IF (pos > POS_FERME)  pos = POS_FERME;
+    IF (pos < POS_OUVERT) pos = POS_OUVERT;
 
-    TRACE("Commande: SET_CLOSURE → %d%%", pos);
+    TRACE("Commande: SET_CLOSURE -> %d%%", pos);
     LAST_CMD = CMD_POSITION;
     SendVeluxPosition(pos);
 }
@@ -386,13 +382,11 @@ PUSH GET_STATE_CLK
 
     IF (CONNECTED = 0)
     {
-        TRACE("GET_STATE ignoré: TCP non connecté");
+        TRACE("GET_STATE ignore: TCP non connecte");
         RETURN;
     }
 
-    // Note: l'URL du device doit être encodée URL pour ce GET,
-    // mais pour TaHoma local API on peut utiliser l'endpoint states global
-    TRACE("Requête: GET état courant");
+    TRACE("Requete: GET etat courant");
     stateEndpoint = "/enduser-mobile-web/1/enduserAPI/setup/devices/" +
                     DEVICE_URL + "/states";
     SendHttpGet(stateEndpoint);
@@ -405,7 +399,7 @@ PUSH GET_STATE_CLK
 PUSH TCP_CONNECTED
 {
     CONNECTED = 1;
-    TRACE("TCP connecté → TaHoma %s:%d", TAHOMA_IP, HTTP_PORT);
+    TRACE("TCP connecte -> TaHoma %s:%d", TAHOMA_IP, HTTP_PORT);
 }
 
 RELEASE TCP_CONNECTED
@@ -413,60 +407,59 @@ RELEASE TCP_CONNECTED
     CONNECTED = 0;
     WAITING_RESPONSE = 0;
     IS_MOVING_FB = 0;
-    TRACE("TCP déconnecté");
+    TRACE("TCP deconnecte");
 }
 
 /*******************************************************************************************
-  Event Handler - Réception données TCP (réponse HTTP TaHoma)
+  Event Handler - Reception donnees TCP (reponse HTTP TaHoma)
+  FIX: FIND avec "\x0D\x0A\x0D\x0A" au lieu de CRLF+CRLF (constante string invalide)
 *******************************************************************************************/
 
 CHANGE RX$
 {
-    // Accumuler les données dans le buffer
     IF (LEN(RX_BUFFER) + LEN(RX$) < MAX_BUFFER)
         RX_BUFFER = RX_BUFFER + RX$;
     ELSE
     {
-        TRACE("AVERTISSEMENT: Buffer RX saturé - réinitialisation");
+        TRACE("AVERTISSEMENT: Buffer RX sature - reinitialisation");
         RX_BUFFER = RX$;
     }
 
-    // Attendre la fin des en-têtes HTTP (double CRLF)
-    IF (FIND(CRLF + CRLF, RX_BUFFER) = 0)
+    // Attendre la fin des en-tetes HTTP: double CRLF = "\x0D\x0A\x0D\x0A"
+    // FIX: pas de concatenation de constante en argument de FIND
+    IF (FIND("\x0D\x0A\x0D\x0A", RX_BUFFER) = 0)
         RETURN;
 
-    // Réponse complète reçue
-    TRACE("← Réponse reçue (%d bytes)", LEN(RX_BUFFER));
+    TRACE("<- Reponse recue (%d bytes)", LEN(RX_BUFFER));
     ProcessHttpResponse(RX_BUFFER);
 
-    // Vider le buffer pour la prochaine requête
     RX_BUFFER = "";
     WAITING_RESPONSE = 0;
 }
 
 /*******************************************************************************************
-  Main Function - Initialisation
+  Main Function
 *******************************************************************************************/
 Function Main()
 {
-    TRACE("=== Démarrage TaHoma Velux IO Module ===");
-    TRACE("Gateway IP  : %s", TAHOMA_IP);
-    TRACE("Device URL  : %s", DEVICE_URL);
-    TRACE("Token       : %s...", LEFT(API_TOKEN, 8));
+    STRING tokenPreview[10];
 
-    // Initialisation des variables
+    TRACE("=== Demarrage TaHoma Velux IO Module v1.1 ===");
+    TRACE("Gateway IP : %s", TAHOMA_IP);
+    TRACE("Device URL : %s", DEVICE_URL);
+
+    // FIX: LEFT() inline dans TRACE non supporte - utiliser une variable
+    tokenPreview = LEFT(API_TOKEN, 8);
+    TRACE("Token      : %s...", tokenPreview);
+
     CONNECTED        = 0;
     WAITING_RESPONSE = 0;
     CURRENT_POSITION = 0;
     LAST_CMD         = 0;
     RX_BUFFER        = "";
 
-    TRACE("Configurer le TCP Client SIMPL:");
-    TRACE("  IP   = %s", TAHOMA_IP);
-    TRACE("  Port = %d", HTTP_PORT);
-    TRACE("  SSL  = ON");
+    TRACE("Config TCP Client SIMPL: IP=%s Port=%d SSL=ON", TAHOMA_IP, HTTP_PORT);
 
-    // Demander la connexion TCP
     CONNECT_TCP = 1;
 
     TRACE("En attente de connexion TCP...");
