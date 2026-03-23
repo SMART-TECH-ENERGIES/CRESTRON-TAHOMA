@@ -1,6 +1,6 @@
 /*******************************************************************************************
   SIMPL+ Module Information
-  Somfy TaHoma Local API - Controle Velux IO - Version 1.3
+  Somfy TaHoma Local API - Controle Velux IO - Version 1.4
 *******************************************************************************************
   Dealer Name:
   System Name:
@@ -150,10 +150,10 @@ FUNCTION QueueAndConnect(STRING request)
     }
     ELSE
     {
-        // Connexion inactive: initier la connexion
-        // La requete sera envoyee dans PUSH TCP_CONNECTED
-        TRACE("-> Connexion TCP en cours...");
-        PULSE(20, CONNECT_TCP);
+        // Connexion inactive: maintenir CONNECT_TCP=1 jusqu'a TCP_CONNECTED
+        // Le handshake SSL TaHoma peut prendre 500ms-2s: un simple PULSE est trop court
+        TRACE("-> Connexion TCP en cours (SSL)...");
+        CONNECT_TCP = 1;
     }
 }
 
@@ -408,7 +408,7 @@ PUSH GET_STATE_CLK
 
 /*******************************************************************************************
   Event Handlers - Connexion TCP
-  Cycle: CONNECT_TCP pulse -> TCP connecte -> envoi immediat -> reponse -> TaHoma ferme
+  Cycle: CONNECT_TCP=1 -> handshake SSL -> TCP_CONNECTED -> envoi -> reponse -> CONNECT_TCP=0 -> deconnexion
 *******************************************************************************************/
 
 PUSH TCP_CONNECTED
@@ -425,8 +425,7 @@ RELEASE TCP_CONNECTED
 {
     CONNECTED = 0;
     WAITING_RESPONSE = 0;
-    // Comportement normal: TaHoma ferme apres chaque reponse (Connection: close)
-    // Pas de reconnexion automatique - la prochaine commande declenchera une nouvelle connexion
+    CONNECT_TCP = 0;  // S assurer que CONNECT_TCP est bien bas apres deconnexion
     TRACE("TCP deconnecte (fin de cycle requete/reponse)");
 }
 
@@ -453,6 +452,8 @@ CHANGE RX$
 
     RX_BUFFER = "";
     WAITING_RESPONSE = 0;
+    // Fermer la connexion depuis notre cote (TaHoma ferme aussi avec Connection: close)
+    CONNECT_TCP = 0;
 }
 
 /*******************************************************************************************
@@ -462,7 +463,7 @@ Function Main()
 {
     STRING tokenPreview[10];
 
-    TRACE("=== Demarrage TaHoma Velux IO Module v1.3 ===");
+    TRACE("=== Demarrage TaHoma Velux IO Module v1.4 ===");
     TRACE("Gateway IP : %s", TAHOMA_IP);
     TRACE("Device URL : %s", DEVICE_URL);
 
@@ -476,7 +477,7 @@ Function Main()
     RX_BUFFER        = "";
     PENDING_REQUEST  = "";
 
-    TRACE("Mode connect-on-demand: connexion declenchee par chaque commande");
-    TRACE("VERIF CABLAGE SIMPL: TCP Client Connected -> TCP_CONNECTED | TX$ -> TCP Tx | TCP Rx -> RX$");
+    TRACE("Mode connect-on-demand: CONNECT_TCP maintenu haut pendant handshake SSL");
+    TRACE("VERIF CABLAGE: TCP Client Connected -> TCP_CONNECTED | TX$ -> TCP Tx | TCP Rx -> RX$");
     TRACE("Pret - en attente de commande OPEN/CLOSE/STOP/MY/SET_POSITION/GET_STATE");
 }
