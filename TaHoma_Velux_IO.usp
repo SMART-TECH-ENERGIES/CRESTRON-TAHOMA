@@ -1,6 +1,6 @@
 /*******************************************************************************************
   SIMPL+ Module Information
-  Somfy TaHoma Local API - Controle Velux IO - Version 1.2
+  Somfy TaHoma Local API - Controle Velux IO - Version 1.3
 *******************************************************************************************
   Dealer Name:
   System Name:
@@ -195,7 +195,7 @@ FUNCTION SendHttpPost(STRING endpoint, STRING jsonBody)
 
     TRACE("-> POST %s (body: %d bytes)", endpoint, bodyLen);
     IS_MOVING_FB = 1;
-    PULSE(20, CMD_SENT_FB);
+    // CMD_SENT_FB sera pulse dans ProcessHttpResponse apres confirmation HTTP 2xx
     QueueAndConnect(request);
 }
 
@@ -317,6 +317,7 @@ FUNCTION ProcessHttpResponse(STRING response)
 
     IF (httpStatus >= 200 && httpStatus < 300)
     {
+        PULSE(20, CMD_SENT_FB);
         IF (FIND("\x22value\x22", response) > 0)
             ParseStateResponse(response);
         ELSE
@@ -461,7 +462,7 @@ Function Main()
 {
     STRING tokenPreview[10];
 
-    TRACE("=== Demarrage TaHoma Velux IO Module v1.2 ===");
+    TRACE("=== Demarrage TaHoma Velux IO Module v1.3 ===");
     TRACE("Gateway IP : %s", TAHOMA_IP);
     TRACE("Device URL : %s", DEVICE_URL);
 
@@ -476,5 +477,6 @@ Function Main()
     PENDING_REQUEST  = "";
 
     TRACE("Mode connect-on-demand: connexion declenchee par chaque commande");
+    TRACE("VERIF CABLAGE SIMPL: TCP Client Connected -> TCP_CONNECTED | TX$ -> TCP Tx | TCP Rx -> RX$");
     TRACE("Pret - en attente de commande OPEN/CLOSE/STOP/MY/SET_POSITION/GET_STATE");
 }
