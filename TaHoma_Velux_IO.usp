@@ -1,6 +1,6 @@
 /*******************************************************************************************
   SIMPL+ Module Information
-  Somfy TaHoma Local API - Contrôle Velux IO - Version 1.1
+  Somfy TaHoma Local API - Controle Velux IO - Version 1.2
 *******************************************************************************************
   Dealer Name:
   System Name:
@@ -13,11 +13,22 @@
       SIMPL+ Module -> TX$ -> [TCP Client SIMPL SSL Port 8443] -> TaHoma -> Velux IO
       SIMPL+ Module <- RX$ <- [TCP Client SIMPL SSL Port 8443] <- TaHoma
 
+    IMPORTANT - Connexion a la demande (connect-on-demand):
+      TaHoma est un serveur HTTP standard - il ferme la connexion s il ne recoit
+      pas de requete HTTP immediatement apres l etablissement du SSL.
+      Ce module fonctionne donc en mode requete/reponse:
+        1. Commande recue  -> requete HTTP mise en attente
+        2. CONNECT_TCP pulsé -> connexion TCP/SSL etablie
+        3. TCP connecte    -> requete envoyee immediatement
+        4. Reponse recue   -> parsing + TaHoma ferme la connexion
+        5. TCP deconnecte  -> pret pour la prochaine commande
+      Pas de connexion persistente. Chaque commande = un cycle connect/send/receive/close.
+
     Configuration du TCP Client dans SIMPL Windows:
-      - IP Address    : Adresse IP de la passerelle TaHoma (ex: 192.168.1.100)
+      - IP Address    : Adresse IP de la passerelle TaHoma (ex: 192.168.10.250)
       - Port          : 8443
-      - Use SSL       : Coche (TLS active)
-      - Auto Reconnect: Coche
+      - Use SSL       : Coche (TLS actif)
+      - Auto Reconnect: Decoche (reconnexion geree par le module)
 
     Connexions SIMPL Windows:
       TX$           -> TCP Client Tx
@@ -70,9 +81,9 @@
   DIGITAL, ANALOG and SERIAL INPUTS and OUTPUTS
 *******************************************************************************************/
 DIGITAL_INPUT   _SKIP_,
-				_SKIP_,
-				_SKIP_,
-				OPEN,
+                _SKIP_,
+                _SKIP_,
+                OPEN,
                 CLOSE,
                 STOP,
                 MY_POSITION,
@@ -85,9 +96,9 @@ DIGITAL_INPUT   _SKIP_,
 ANALOG_INPUT    POSITION_IN;
 
 DIGITAL_OUTPUT  _SKIP_,
-				_SKIP_,
-				_SKIP_,
-				CONNECT_TCP,
+                _SKIP_,
+                _SKIP_,
+                CONNECT_TCP,
                 _SKIP_,
                 CMD_SENT_FB,
                 ERROR_FB,
@@ -116,11 +127,54 @@ INTEGER     WAITING_RESPONSE;
 INTEGER     CURRENT_POSITION;
 INTEGER     LAST_CMD;
 STRING      RX_BUFFER[MAX_BUFFER];
+STRING      PENDING_REQUEST[1500];  // Requete en attente d envoi apres connexion
+
+/*******************************************************************************************
+  Helper Functions - Envoi en attente (connect-on-demand)
+  Note: "\x0D\x0A" = CRLF  |  "\x22" = guillemet double  |  "\x7B" = {
+*******************************************************************************************/
+
+// Stocke la requete et declenche la connexion TCP
+// Si deja connecte, envoie immediatement
+FUNCTION QueueAndConnect(STRING request)
+{
+    PENDING_REQUEST = request;
+
+    IF (CONNECTED = 1)
+    {
+        // Connexion deja active: envoyer directement
+        TRACE("-> Envoi direct (%d bytes)", LEN(PENDING_REQUEST));
+        TX$ = PENDING_REQUEST;
+        PENDING_REQUEST = "";
+        WAITING_RESPONSE = 1;
+    }
+    ELSE
+    {
+        // Connexion inactive: initier la connexion
+        // La requete sera envoyee dans PUSH TCP_CONNECTED
+        TRACE("-> Connexion TCP en cours...");
+        PULSE(20, CONNECT_TCP);
+    }
+}
+
+// Envoie la requete en attente - appele depuis PUSH TCP_CONNECTED
+FUNCTION FlushPendingRequest()
+{
+    IF (LEN(PENDING_REQUEST) > 0)
+    {
+        TRACE("-> Envoi requete (%d bytes)", LEN(PENDING_REQUEST));
+        TX$ = PENDING_REQUEST;
+        PENDING_REQUEST = "";
+        WAITING_RESPONSE = 1;
+    }
+    ELSE
+    {
+        TRACE("AVERTISSEMENT: TCP connecte mais pas de requete en attente");
+    }
+}
 
 /*******************************************************************************************
   Helper Functions - Construction des requetes HTTP
-  Note: "\x0D\x0A" = CRLF (HTTP line ending)
-        "\x22"      = guillemet double (pour JSON)
 *******************************************************************************************/
 
 FUNCTION SendHttpPost(STRING endpoint, STRING jsonBody)
@@ -139,11 +193,10 @@ FUNCTION SendHttpPost(STRING endpoint, STRING jsonBody)
               "\x0D\x0A" +
               jsonBody;
 
-    TRACE("-> HTTP POST %s (%d bytes body)", endpoint, bodyLen);
-    TX$ = request;
-    WAITING_RESPONSE = 1;
+    TRACE("-> POST %s (body: %d bytes)", endpoint, bodyLen);
     IS_MOVING_FB = 1;
     PULSE(20, CMD_SENT_FB);
+    QueueAndConnect(request);
 }
 
 FUNCTION SendHttpGet(STRING endpoint)
@@ -156,9 +209,8 @@ FUNCTION SendHttpGet(STRING endpoint)
               "Connection: close" + "\x0D\x0A" +
               "\x0D\x0A";
 
-    TRACE("-> HTTP GET %s", endpoint);
-    TX$ = request;
-    WAITING_RESPONSE = 1;
+    TRACE("-> GET %s", endpoint);
+    QueueAndConnect(request);
 }
 
 // JSON exec/apply sans parametre: open, close, stop, my
@@ -190,7 +242,6 @@ FUNCTION SendVeluxPosition(INTEGER position)
   Helper Functions - Parsing de la reponse HTTP
 *******************************************************************************************/
 
-// Retourne le code de statut HTTP: "HTTP/1.1 200 OK" -> 200
 INTEGER_FUNCTION ParseHttpStatus(STRING response)
 {
     INTEGER pos;
@@ -204,9 +255,7 @@ INTEGER_FUNCTION ParseHttpStatus(STRING response)
     RETURN(ATOI(statusStr));
 }
 
-// Extrait la valeur entiere d un champ JSON : recherche "key":NNN
-// FIX: utilise une variable temporaire pour FIND (pas de concatenation en argument)
-// FIX: utilise dummy = REMOVE() pour satisfaire le compilateur SIMPL+
+// Extrait la valeur entiere d un champ JSON: "key":NNN
 INTEGER_FUNCTION ParseJsonInt(STRING json, STRING key)
 {
     INTEGER keyPos, colonPos;
@@ -215,23 +264,18 @@ INTEGER_FUNCTION ParseJsonInt(STRING json, STRING key)
     STRING  token[20];
     STRING  dummy[25];
 
-    // Construction de la cle entre guillemets: "key"
-    // \x22 = guillemet double - evite la concatenation de litteraux dans FIND
     searchKey = "\x22" + key + "\x22";
     keyPos = FIND(searchKey, json);
     IF (keyPos = 0)
         RETURN(-1);
 
-    // Extraire la sous-chaine a partir de la cle pour trouver le ":" qui suit
     afterKey = MID(json, keyPos, 100);
     colonPos = FIND(":", afterKey);
     IF (colonPos = 0)
         RETURN(-1);
 
-    // Lire la valeur apres le ":"
     token = MID(afterKey, colonPos + 1, 15);
 
-    // Supprimer les delimiteurs JSON - dummy obligatoire car REMOVE retourne une STRING
     WHILE (FIND(",",    token) > 0) { dummy = REMOVE(",",    token); }
     WHILE (FIND("}",    token) > 0) { dummy = REMOVE("}",    token); }
     WHILE (FIND("]",    token) > 0) { dummy = REMOVE("]",    token); }
@@ -256,7 +300,6 @@ FUNCTION ParseStateResponse(STRING response)
 {
     INTEGER closureValue;
 
-    // Format TaHoma: [{"name":"core:ClosureState","type":3,"value":50}]
     closureValue = ParseJsonInt(response, "value");
 
     IF (closureValue >= 0 && closureValue <= 100)
@@ -307,16 +350,11 @@ FUNCTION ProcessHttpResponse(STRING response)
 
 /*******************************************************************************************
   Event Handlers - Commandes Velux IO
+  Note: plus de verification CONNECTED - le module gere la connexion a la demande
 *******************************************************************************************/
 
 PUSH OPEN
 {
-    IF (CONNECTED = 0)
-    {
-        TRACE("OPEN ignore: TCP non connecte");
-        PULSE(20, ERROR_FB);
-        RETURN;
-    }
     TRACE("Commande: OPEN");
     LAST_CMD = CMD_OPEN;
     SendVeluxCmd("open");
@@ -324,12 +362,6 @@ PUSH OPEN
 
 PUSH CLOSE
 {
-    IF (CONNECTED = 0)
-    {
-        TRACE("CLOSE ignore: TCP non connecte");
-        PULSE(20, ERROR_FB);
-        RETURN;
-    }
     TRACE("Commande: CLOSE");
     LAST_CMD = CMD_CLOSE;
     SendVeluxCmd("close");
@@ -337,12 +369,6 @@ PUSH CLOSE
 
 PUSH STOP
 {
-    IF (CONNECTED = 0)
-    {
-        TRACE("STOP ignore: TCP non connecte");
-        PULSE(20, ERROR_FB);
-        RETURN;
-    }
     TRACE("Commande: STOP");
     LAST_CMD = CMD_STOP;
     IS_MOVING_FB = 0;
@@ -351,12 +377,6 @@ PUSH STOP
 
 PUSH MY_POSITION
 {
-    IF (CONNECTED = 0)
-    {
-        TRACE("MY ignore: TCP non connecte");
-        PULSE(20, ERROR_FB);
-        RETURN;
-    }
     TRACE("Commande: MY (position favorite)");
     LAST_CMD = CMD_MY;
     SendVeluxCmd("my");
@@ -365,13 +385,6 @@ PUSH MY_POSITION
 PUSH SET_POSITION_CLK
 {
     INTEGER pos;
-
-    IF (CONNECTED = 0)
-    {
-        TRACE("SET_POSITION ignore: TCP non connecte");
-        PULSE(20, ERROR_FB);
-        RETURN;
-    }
 
     pos = POSITION_IN;
     IF (pos > POS_FERME)  pos = POS_FERME;
@@ -386,12 +399,6 @@ PUSH GET_STATE_CLK
 {
     STRING stateEndpoint[300];
 
-    IF (CONNECTED = 0)
-    {
-        TRACE("GET_STATE ignore: TCP non connecte");
-        RETURN;
-    }
-
     TRACE("Requete: GET etat courant");
     stateEndpoint = "/enduser-mobile-web/1/enduserAPI/setup/devices/" +
                     DEVICE_URL + "/states";
@@ -400,32 +407,30 @@ PUSH GET_STATE_CLK
 
 /*******************************************************************************************
   Event Handlers - Connexion TCP
+  Cycle: CONNECT_TCP pulse -> TCP connecte -> envoi immediat -> reponse -> TaHoma ferme
 *******************************************************************************************/
 
 PUSH TCP_CONNECTED
 {
     CONNECTED = 1;
     TRACE("TCP connecte -> TaHoma %s:%d", TAHOMA_IP, HTTP_PORT);
+
+    // Envoyer immediatement la requete en attente
+    // TaHoma ferme la connexion si rien n arrive rapidement
+    FlushPendingRequest();
 }
 
 RELEASE TCP_CONNECTED
 {
     CONNECTED = 0;
     WAITING_RESPONSE = 0;
-    IS_MOVING_FB = 0;
-    TRACE("TCP deconnecte - reconnexion dans 5s...");
-
-    // Tentative de reconnexion automatique apres 5 secondes
-    WAIT(500, ReconnectWait)
-    {
-        TRACE("Tentative de reconnexion TCP...");
-        PULSE(20, CONNECT_TCP);
-    }
+    // Comportement normal: TaHoma ferme apres chaque reponse (Connection: close)
+    // Pas de reconnexion automatique - la prochaine commande declenchera une nouvelle connexion
+    TRACE("TCP deconnecte (fin de cycle requete/reponse)");
 }
 
 /*******************************************************************************************
   Event Handler - Reception donnees TCP (reponse HTTP TaHoma)
-  FIX: FIND avec "\x0D\x0A\x0D\x0A" au lieu de CRLF+CRLF (constante string invalide)
 *******************************************************************************************/
 
 CHANGE RX$
@@ -438,8 +443,7 @@ CHANGE RX$
         RX_BUFFER = RX$;
     }
 
-    // Attendre la fin des en-tetes HTTP: double CRLF = "\x0D\x0A\x0D\x0A"
-    // FIX: pas de concatenation de constante en argument de FIND
+    // Attendre la fin des en-tetes HTTP: double CRLF
     IF (FIND("\x0D\x0A\x0D\x0A", RX_BUFFER) = 0)
         RETURN;
 
@@ -457,11 +461,10 @@ Function Main()
 {
     STRING tokenPreview[10];
 
-    TRACE("=== Demarrage TaHoma Velux IO Module v1.1 ===");
+    TRACE("=== Demarrage TaHoma Velux IO Module v1.2 ===");
     TRACE("Gateway IP : %s", TAHOMA_IP);
     TRACE("Device URL : %s", DEVICE_URL);
 
-    // FIX: LEFT() inline dans TRACE non supporte - utiliser une variable
     tokenPreview = LEFT(API_TOKEN, 8);
     TRACE("Token      : %s...", tokenPreview);
 
@@ -470,12 +473,8 @@ Function Main()
     CURRENT_POSITION = 0;
     LAST_CMD         = 0;
     RX_BUFFER        = "";
+    PENDING_REQUEST  = "";
 
-    TRACE("Config TCP Client SIMPL: IP=%s Port=%d SSL=ON", TAHOMA_IP, HTTP_PORT);
-
-    // PULSE genere un front montant 0->1 necessaire pour declencher le TCP Client
-    // CONNECT_TCP = 1 statique peut ne pas etre detecte comme evenement de connexion
-    PULSE(20, CONNECT_TCP);
-
-    TRACE("En attente de connexion TCP...");
+    TRACE("Mode connect-on-demand: connexion declenchee par chaque commande");
+    TRACE("Pret - en attente de commande OPEN/CLOSE/STOP/MY/SET_POSITION/GET_STATE");
 }
