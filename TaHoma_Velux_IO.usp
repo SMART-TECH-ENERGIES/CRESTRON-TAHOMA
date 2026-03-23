@@ -413,7 +413,14 @@ RELEASE TCP_CONNECTED
     CONNECTED = 0;
     WAITING_RESPONSE = 0;
     IS_MOVING_FB = 0;
-    TRACE("TCP deconnecte");
+    TRACE("TCP deconnecte - reconnexion dans 5s...");
+
+    // Tentative de reconnexion automatique apres 5 secondes
+    WAIT(500, ReconnectWait)
+    {
+        TRACE("Tentative de reconnexion TCP...");
+        PULSE(20, CONNECT_TCP);
+    }
 }
 
 /*******************************************************************************************
@@ -466,7 +473,9 @@ Function Main()
 
     TRACE("Config TCP Client SIMPL: IP=%s Port=%d SSL=ON", TAHOMA_IP, HTTP_PORT);
 
-    CONNECT_TCP = 1;
+    // PULSE genere un front montant 0->1 necessaire pour declencher le TCP Client
+    // CONNECT_TCP = 1 statique peut ne pas etre detecte comme evenement de connexion
+    PULSE(20, CONNECT_TCP);
 
     TRACE("En attente de connexion TCP...");
 }
